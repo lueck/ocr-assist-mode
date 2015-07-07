@@ -1,4 +1,4 @@
-;;; ocr-assist-mode.el --- assists you with restructuring an OCRed text.
+;;; ocr-assist-mode.el --- assists in restructuring an OCRed text.
 
 ;; Copyright (C) 2015 Christian Lück
 
@@ -21,7 +21,7 @@
 
 ;; You should have received a copy of the GNU General Public License
 ;; along with standoff-mode. If not, see
-;; <http://www.gnu.org/
+;; <http://www.gnu.org/licenses/>.
 
 ;;; Commentary:
 
@@ -31,17 +31,120 @@
 
 ;; - put together the mark and text of a footnote
 
+
+;; Usage:
+
+;; M-x ocr-assist-mode RET activates the mode.
+
+;; C-c , ist bound to the command for putting together the mark and
+;; text of a footnote.
+
+;; Customization:
+
+;; The format string that replaces the footnote mark is customized on
+;; a major mode basis. This means, that there are different strings
+;; for buffers in latex-mode or in nxml-mode etc. E.g. for latex-mode
+;; the format string is set to
+;; "%\n\\\\footnote{##FOOTNOTETEXT##}\\3%\n".
+
+;; ##FOOTNOTETEXT## ist a placeholder for the text of the footnote and
+;; will be replaced with it. The placeholder can be changed by setting
+;; the variable `ocr-assist-fn-text-placeholder'. It is recommended to
+;; use that variable when defining the format string, e.g. by
+;; concatenation:
+;; (concat "%\n\\\\footnote{" ocr-assist-fn-text-placeholder } "\\3%\n")
+
+;; The string may contain \N with N of 1...3. These match the Nth
+;; group `\(..\)' in `ocr-assist-fn-re'; so \1 provides the whitespace
+;; found before the footnote mark, \2 provides the footnote mark, \3
+;; provides the whitespace after the mark.
+
+;; E.g. to customize the format string for footnotes used in
+;; latex-mode (AucTeX) so that it prints the original number of the
+;; footnote in the end of the text, put the following code in your
+;; init file:
+
+;; (eval-after-load "ocr-assist-mode"
+;;   '(progn
+;;      (setq my-fn-replacement-latex (concat "%\n\\\\footnote{"
+;; 					   ocr-assist-fn-text-placeholder
+;; 					   "\\\\origfn{\\2}}\\3%\n"))
+;;      (add-to-list 'ocr-assist-fn-replacement-mode-alist
+;; 		  `(latex-mode . ,my-fn-replacement-latex))))
+
+
 ;;; Code
+
+(defgroup ocr-assist nil
+  "Customize ocr-assist-mode.
+ocr-assist-mode is a minor mode assisting with OCRed texts."
+  :group 'Text)
+
+;;;; footnotes
 
 (defvar ocr-assist-fn-re "\\([[:space:]]*\\)\\([0-9]+\\)\\([[:space:]]*\\)")
 (defvar ocr-assist-fn-text-number-re "^%s[[:space:]\n]*")
 
-(defconst ocr-assist-fn-text-placeholder "##FOOTNOTETEXT##")
+(defconst ocr-assist-fn-text-placeholder "##FOOTNOTETEXT##"
+  "A placeholder for the text of footnote.
+`ocr-assist-fn-replacement' must contain this string to mark the
+place where to put the footnote text.")
 
-(defvar ocr-assist-fn-replacement 
-  (concat "%\n\\\\footnote{" ocr-assist-fn-text-placeholder "\\\\ofn{\\2}}\\3%\n"))
+(defcustom ocr-assist-fn-more-re "^"
+  "Pattern at which the user is asked if the footnote text ends or exceeds.
+With the default value of \"^\" this asks at every new line.")
 
-(defvar ocr-assist-fn-more-re "^")
+(defvar ocr-assist-fn-replacement nil
+  "This variable set per buffer according to its major mode.
+See `ocr-assist-fn-replacement-mode-alist' for details.")
+
+(defvar ocr-assist-fn-replacement-latex
+  (concat "%\n\\\\footnote{" ocr-assist-fn-text-placeholder "}\\3%\n")
+  "Footnote code string for LaTeX.
+See `ocr-assist-fn-replacement-mode-alist' for details.")
+
+(defvar ocr-assist-fn-replacement-xml
+  (concat "<footnote label=\"\\2\">" ocr-assist-fn-text-placeholder "</footnote>\\3")
+  "Footnote code string for XML via nxml-mode.
+See `ocr-assist-fn-replacement-mode-alist' for details.")
+
+(defcustom ocr-assist-fn-replacement-default ocr-assist-fn-replacement-latex
+  "Default for code string for footnotes.
+See `ocr-assist-fn-replacement-mode-alist' for details."
+  :group 'ocr-assist
+  :type 'string)
+
+(defcustom ocr-assist-fn-replacement-mode-alist
+  `(('latex-mode . ,ocr-assist-fn-replacement-latex)
+    ('nxml-mode . ,ocr-assist-fn-replacement-xml))
+  "Mapping modes to replacement strings.
+Note, that one overrides the values of an alist simply by adding
+a new key/value pair--no need for deletion.
+
+Put \N (with N of 1..3) in that string to refer to 1) whitespace
+before the mark, 2) the mark or 3) whitespace after the
+mark. This string must contain `ocr-assist-fn-text-placeholder'
+which marks where to put the text in the string.
+
+Example for latex:
+
+(setq my-replacement-string (concat \"%\n\\\\footnote{\" ocr-assist-fn-text-placeholder \"\\\\origfn{\\2}}\\3%\n\"))
+;; override existing value
+(add-to-list 'ocr-assist-fn-replacement-mode-alist
+	     `(latex-mode . ,my-replacement-string))
+
+If you want to set the replacement string according to an XML
+schema you could write a hook to set this variable up."
+  :group 'ocr-assist
+  :type 'list)
+
+(defun ocr-assist-fn-replacement-set ()
+  "Sets `ocr-assist-fn-replacement' according to major mode."
+  (setq ocr-assist-fn-replacement
+	(or (cdr (assoc major-mode ocr-assist-fn-replacement-mode-alist))
+	    ocr-assist-fn-replacement-default)))
+
+(add-hook 'ocr-assist-mode-hook 'ocr-assist-fn-replacement-set)
 
 (defun ocr-assist-footnote ()
   "Search for footnote mark (number) and put it together with the footnote text.
@@ -66,12 +169,13 @@ text is moved to a placeholder in the footnote code."
       (if (search-backward ocr-assist-fn-text-placeholder nil t)
 	  (progn
 	    (delete-char (length ocr-assist-fn-text-placeholder))
-	    (insert (ocr-assist-fn-search-text number (point))))
+	    (insert (ocr-assist-fn-search-text number)))
 	(error "The variable ocr-assist-fn-replacement doesn't contain \"%s\"" ocr-assist-fn-text-placeholder))
       (setq continue nil)))
   (ocr-assist-dehighlight)))
 
-(defun ocr-assist-fn-search-text (number fn-point)
+(defun ocr-assist-fn-search-text (number)
+  "Aggregate footnote text for footnote with number NUMBER."
   (save-excursion
     (re-search-forward (format ocr-assist-fn-text-number-re number))
     (ocr-assist-highlight (match-beginning 0) (match-end 0))
@@ -89,7 +193,9 @@ text is moved to a placeholder in the footnote code."
 	  (delete-region fn-number-start fn-number-end)
 	  ;; after deletion of number, text starts where number started
 	  (delete-and-extract-region fn-number-start (point)))
-      (ocr-assist-fn-search-text number (point)))))
+      (ocr-assist-fn-search-text number))))
+
+;;;; highlight
 
 (defvar ocr-assist-overlay nil)
 
@@ -112,12 +218,17 @@ text is moved to a placeholder in the footnote code."
 
 ;;;###autoload
 (define-minor-mode ocr-assist-mode
-  "Toggle minor mode assisting with an OCRed text."
+  "Toggle minor mode that assists in restructuring an OCRed text.
+
+See the command \\[ocr-assist-footnote]."
   ;; initial value
   nil
   ;; mode line indicator
   " OCR"
   ;; key binding
-  '(([?\C-c ?,] . ocr-assist-footnote)))
+  '(([?\C-c ?,] . ocr-assist-footnote))
+  ;; body
+  (when ocr-assist-mode
+    (setq-local ocr-assist-fn-replacement nil)))
 
 ;;; ocr-assist-mode.el ends here.
