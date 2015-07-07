@@ -98,25 +98,11 @@ With the default value of \"^\" this asks at every new line.")
   "This variable set per buffer according to its major mode.
 See `ocr-assist-fn-replacement-mode-alist' for details.")
 
-(defvar ocr-assist-fn-replacement-latex
-  (concat "%\n\\\\footnote{" ocr-assist-fn-text-placeholder "}\\3%\n")
-  "Footnote code string for LaTeX.
-See `ocr-assist-fn-replacement-mode-alist' for details.")
-
-(defvar ocr-assist-fn-replacement-xml
-  (concat "<footnote label=\"\\2\">" ocr-assist-fn-text-placeholder "</footnote>\\3")
-  "Footnote code string for XML via nxml-mode.
-See `ocr-assist-fn-replacement-mode-alist' for details.")
-
-(defcustom ocr-assist-fn-replacement-default ocr-assist-fn-replacement-latex
-  "Default for code string for footnotes.
-See `ocr-assist-fn-replacement-mode-alist' for details."
-  :group 'ocr-assist
-  :type 'string)
-
 (defcustom ocr-assist-fn-replacement-mode-alist
-  `(('latex-mode . ,ocr-assist-fn-replacement-latex)
-    ('nxml-mode . ,ocr-assist-fn-replacement-xml))
+  (let ((txt ocr-assist-fn-text-placeholder))
+    `(('latex-mode . ,(format "%%\n\\\\footnote{%s}\\3%%\n" txt))
+      ('nxml-mode . ,(format "<footnote label=\"\\2\">%s</footnote>\\3" txt))
+      ("default" . ,(format "[\\2: %s]\\3" txt))))
   "Mapping modes to replacement strings.
 Note, that one overrides the values of an alist simply by adding
 a new key/value pair--no need for deletion.
@@ -128,10 +114,9 @@ which marks where to put the text in the string.
 
 Example for latex:
 
-(setq my-replacement-string (concat \"%\n\\\\footnote{\" ocr-assist-fn-text-placeholder \"\\\\origfn{\\2}}\\3%\n\"))
-;; override existing value
 (add-to-list 'ocr-assist-fn-replacement-mode-alist
-	     `(latex-mode . ,my-replacement-string))
+	     `(latex-mode . ,(format \"%%\n\\\\footnote{%s \\\\origfn{\\2}}\\3%%\n\"
+				     ocr-assist-fn-text-placeholder)))
 
 If you want to set the replacement string according to an XML
 schema you could write a hook to set this variable up."
@@ -195,6 +180,81 @@ text is moved to a placeholder in the footnote code."
 	  (delete-and-extract-region fn-number-start (point)))
       (ocr-assist-fn-search-text number))))
 
+;;;; page numbers
+
+(defcustom ocr-assist-pb-re "\n\\([\n[:space:]0-9]*\\)\n"
+  "Regex for pagebreaks."
+  :group 'ocr-assist
+  :type 'string)
+
+(defvar ocr-assist-pb-replacement-par nil)
+
+(defvar ocr-assist-pb-replacement-nopar nil)
+
+(defconst ocr-assist-pb-number-placeholder "##PAGENUMBER##")
+
+(defcustom ocr-assist-pb-replacement-mode-alist
+  (let ((pn ocr-assist-pb-number-placeholder))
+    `((latex-mode . (,(format " %%\n[%s] %%\n" pn) ,(format "\n\n[%s] %%\n" pn)))
+      (nxml-mode . (,(format "&#10;[%s] " pn) ,(format "</p>\n<p>[%s] " pn)))
+      ("default" . (,(format "\n%s " pn) ,(format "\n\n%s " pn)))))
+  "Mapping strings for replacing page numbers to major modes.
+The cdr of the elements of this alist are lists. The first
+element is for non-paragraph pagebreaks, the second for
+pagebreaks which are paragraphs, too. If the string contains the
+value of `ocr-assist-pb-number-placeholder', this substring will
+be replaced with a page number which is not read from the OCRed
+text, but calculated by the command assisting with
+pagebreaks. The groups \(..\) of `ocr-assist-pb-re' are also
+accessible, by placing \N in the string where N represents the
+Nth matching group.
+
+Example for overriding latex-mode:
+
+ (add-to-list 'ocr-assist-pb-replacement-mode-alist
+	      (let ((pn ocr-assist-pb-number-placeholder))
+		`(latex-mode . (,(format \" %%\n\\\\pb{%s} %%\n\" pn)
+				,(format \"\n\n\\\\pb{%s} %%\n\" pn)))))
+
+"
+  :group 'ocr-assist
+  :type 'list)
+
+(defun ocr-assist-pb-replacement-set ()
+  "Set the pagebreak replacement string according to major mode."
+  (let ((repl (or (assoc major-mode ocr-assist-pb-replacement-mode-alist)
+		  (assoc "default" ocr-assist-pb-replacement-mode-alist))))
+    (setq ocr-assist-pb-replacement-nopar (nth 0 (cdr repl))
+	  ocr-assist-pb-replacement-par (nth 1 (cdr repl)))
+    (message "pb-replacement: %s" ocr-assist-pb-replacement-nopar)
+    ))
+
+(add-hook 'ocr-assist-mode-hook 'ocr-assist-pb-replacement-set)
+
+(defun ocr-assist-pb-inc-number (p)
+  "Increment the page number.
+Override this function to get other than arabic page numbers."
+  (+ p 1))
+
+(defun ocr-assist-pagebreak (startpage)
+  "Assist finding pagebreaks and adding a page number in the text."
+  (interactive "NStart with page number: ")
+  (while (re-search-forward ocr-assist-pb-re)
+    (ocr-assist-highlight (match-beginning 0) (match-end 0))
+    (when (y-or-n-p (format "Page break %s?" startpage))
+      (let ((transient-mark-mode nil))
+	(push-mark)
+	(if (y-or-n-p "Paragraph?")
+	    (replace-match ocr-assist-pb-replacement-par)
+	  (replace-match ocr-assist-pb-replacement-nopar))
+	(when (search-backward ocr-assist-pb-number-placeholder nil t)
+	  ;; ##PAGENUMBER## is not neccessarily included in the replacement
+	  (delete-char (length ocr-assist-pb-number-placeholder))
+	  (insert (format "%s" startpage)))
+	(goto-char (mark))
+	(pop-mark)
+	(setq startpage (ocr-assist-pb-inc-number startpage))))))
+
 ;;;; highlight
 
 (defvar ocr-assist-overlay nil)
@@ -226,9 +286,12 @@ See the command \\[ocr-assist-footnote]."
   ;; mode line indicator
   " OCR"
   ;; key binding
-  '(([?\C-c ?,] . ocr-assist-footnote))
+  '(([?\C-c ?,] . ocr-assist-footnote)
+    ([?\C-c ?.] . ocr-assist-pagebreak))
   ;; body
   (when ocr-assist-mode
-    (setq-local ocr-assist-fn-replacement nil)))
+    (setq-local ocr-assist-fn-replacement nil)
+    (setq-local ocr-assist-pb-replacement-par nil)
+    (setq-local ocr-assist-pb-replacement-nopar nil)))
 
 ;;; ocr-assist-mode.el ends here.
