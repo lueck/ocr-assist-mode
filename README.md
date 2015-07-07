@@ -7,6 +7,7 @@ recognition. This mode provides interactive commands that let you
 
 - put together the mark and text of a footnote
 
+- handle page breaks and page numbers
 
 ## Usage ##
 
